@@ -98,13 +98,13 @@ jobs:
           node-version: 16
           cache: 'yarn'
 
-      - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v1
-        if: ${{ !env.ACT }}
-        with:
-          aws-access-key-id: ${{ secrets[format('AWS_ACCESS_KEY_ID_{0}', steps.region.outputs.TARGET_REGION_CAPITALIZED)] }}
-          aws-secret-access-key: ${{ secrets[format('AWS_SECRET_ACCESS_KEY_{0}', steps.region.outputs.TARGET_REGION_CAPITALIZED)] }}
-          aws-region: us-east-1
+      # - name: Configure AWS credentials
+      #   uses: aws-actions/configure-aws-credentials@v1
+      #   if: ${{ !env.ACT }}
+      #   with:
+      #     aws-access-key-id: ${{ secrets[format('AWS_ACCESS_KEY_ID_{0}', steps.region.outputs.TARGET_REGION_CAPITALIZED)] }}
+      #     aws-secret-access-key: ${{ secrets[format('AWS_SECRET_ACCESS_KEY_{0}', steps.region.outputs.TARGET_REGION_CAPITALIZED)] }}
+      #     aws-region: us-east-1
 
       - name: Install dependencies
         run: |
