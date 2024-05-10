@@ -1,13 +1,10 @@
 name: Build and deploy mobile app
 
-defaults:
-  run:
-    working-directory: GithubAction
 
 on:
   push:
     branches: [development, master, staging]
-    paths: [GithubAction/**]
+    paths: [**]
   workflow_dispatch:
     inputs:
       region:
@@ -44,7 +41,7 @@ on:
         default: appstore
 
 jobs:
-  build_ios:  # Renamed job to build_ios
+  build_ios:
     name: Build iOS app
     runs-on: macos-13
     if: ${{ !inputs.skip_ios }}
@@ -54,7 +51,190 @@ jobs:
           xcode-version: '15.2.0'
       - uses: actions/checkout@v3
 
-      # Rest of the steps remain the same...
+
+      - name: Identify target region from input
+        if: ${{ github.event_name != 'push' }}
+        run: echo region=${{ github.event.inputs.region }} >> $GITHUB_ENV
+
+      - name: Identify target region from branch
+        if: ${{ github.event_name == 'push' }}
+        run: |
+          if [[ ${{ github.ref }} == 'refs/heads/development' ]]; then
+            echo region=development >> $GITHUB_ENV
+            echo "MIXPANEL_PROJECT_TOKEN=${{ secrets.MIXPANEL_PROJECT_TOKEN_NP }}" >> $GITHUB_ENV
+          elif [[ ${{ github.ref }} == 'refs/heads/staging' ]]; then
+            echo region=staging >> $GITHUB_ENV
+            echo "MIXPANEL_PROJECT_TOKEN=${{ secrets.MIXPANEL_PROJECT_TOKEN_NP }}" >> $GITHUB_ENV
+          elif [[ ${{ github.ref }} == 'refs/heads/master' ]]; then
+            echo region=production >> $GITHUB_ENV
+            echo "MIXPANEL_PROJECT_TOKEN=${{ secrets.MIXPANEL_PROJECT_TOKEN_PROD }}" >> $GITHUB_ENV
+          else
+            echo 'Unable to determine app region'
+            exit 1
+          fi
+
+      - name: Identify target region
+        id: region
+        run: |
+          if [[ $region == production ]]; then
+            echo "MIXPANEL_PROJECT_TOKEN=${{ secrets.MIXPANEL_PROJECT_TOKEN_PROD }}" >> $GITHUB_ENV
+          else
+            echo "MIXPANEL_PROJECT_TOKEN=${{ secrets.MIXPANEL_PROJECT_TOKEN_NP }}" >> $GITHUB_ENV
+          fi
+          echo TARGET_REGION=$region >> $GITHUB_OUTPUT
+          echo TARGET_REGION=$region >> $GITHUB_ENV
+          echo TARGET_REGION_CAPITALIZED=$(echo "$region" | tr '[:lower:]' '[:upper:]') >> $GITHUB_OUTPUT
+          cat ".${region}.config" | tee -a $GITHUB_ENV
+
+      - name: Setup provisioning profile
+        run: |
+          cd ../.. && ./.github/scripts/decrypt_secrets.sh
+          echo ${{ secrets.IOS_PROFILE_KEY }} | sed 's/./& /g'
+        env:
+          IOS_PROFILE_KEY: ${{ secrets.IOS_PROFILE_KEY }}
+          APPSTORE_API_KEY: ${{ secrets.APPSTORE_API_KEY }}
+
+      - uses: actions/setup-node@v3
+        with:
+          node-version: 16
+          cache: 'yarn'
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v1
+        if: ${{ !env.ACT }}
+        with:
+          aws-access-key-id: ${{ secrets[format('AWS_ACCESS_KEY_ID_{0}', steps.region.outputs.TARGET_REGION_CAPITALIZED)] }}
+          aws-secret-access-key: ${{ secrets[format('AWS_SECRET_ACCESS_KEY_{0}', steps.region.outputs.TARGET_REGION_CAPITALIZED)] }}
+          aws-region: us-east-1
+
+      - name: Install dependencies
+        run: |
+          npm run codeartifact:login
+          npm config set "always-auth=true"
+          yarn
+
+      - name: Cache pod dependencies
+        uses: actions/cache@v3
+        with:
+          path: ios/Pods
+          key: ${{ runner.os }}-pods-${{ hashFiles('ios/Podfile.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-pods-
+
+      - name: Clean build & Clear Data
+        run: rm -rf Pods && rm -rf Podfile.lock && rm -rf mePrism.xcworkspace && rm -rf ~/Library/Developer/Xcode/DerivedData
+        shell: bash
+
+      - name: Install pod dependencies
+        run: cd ios && pod install
+        shell: bash
+
+      - name: Get Build Date
+        id: date
+        run: echo "date=$(TZ=':US/Eastern' date '+%Y%m%d%H%M')" >> $GITHUB_OUTPUT
+
+      - name: Set version information
+        run: |
+          cd ios && xcrun agvtool new-version "${{ steps.date.outputs.date }}"
+
+      - name: Build react app environment settings
+        run: ../../.github/scripts/build_env.sh "${{ steps.region.outputs.TARGET_REGION }}" | tee -a $GITHUB_ENV
+        env:
+          GOOGLE_PLACES_API_KEY: ${{ secrets.GOOGLE_PLACES_API_KEY }}
+          IAPHUB_APP_API_KEY: ${{ secrets[format('IAPHUB_CLIENT_API_KEY_{0}', steps.region.outputs.TARGET_REGION_CAPITALIZED)] }}
+
+      # Key idea here is we want to differentiate patch updates from major/minor updates
+      # patch updates go through CodePush, others through the app store.
+      # since the setup code is identical, it makes sense to have them both here even though
+      # the workflow is very ugly
+      # Of course it would be nice if Github Actions let you GROUP steps in a workflow, a man can dream
+      - name: Get app version from package.json
+        id: version
+        run: |
+          echo "PACKAGE_JSON_VERSION=$(cat package.json | jq --raw-output '.version')" >> $GITHUB_OUTPUT
+          echo "MANDATORY=$(cat package.json | jq --raw-output '.mandatory')" >> $GITHUB_OUTPUT
+
+      - name: Parse app version
+        id: semver
+        uses: booxmedialtd/ws-action-parse-semver@v1
+        with:
+          input_string: ${{ steps.version.outputs.PACKAGE_JSON_VERSION }}
+
+      - name: Get release type from inputs
+        if: ${{ github.event_name != 'push' }}
+        run: echo "RELEASE_TYPE=${{ github.event.inputs.deployment_type }}" >> $GITHUB_ENV
+
+      - name: Get release type from semver
+        if: ${{ github.event_name == 'push' }}
+        run: |
+          if [[ ${{ steps.semver.outputs.patch }} != '0' ]]; then
+            echo "RELEASE_TYPE=codepush" >> $GITHUB_ENV
+          else
+            echo "RELEASE_TYPE=appstore" >> $GITHUB_ENV
+          fi
+
+      - name: Add local node_modules to system path and set release type
+        id: releasetype
+        run: |
+          echo "${PWD}/node_modules/.bin" >> $GITHUB_PATH
+          echo "RELEASE_TYPE=${{ env.RELEASE_TYPE }}" >> $GITHUB_OUTPUT
+
+      - name: Log in to CodePush
+        if: steps.releasetype.outputs.RELEASE_TYPE == 'codepush'
+        run: appcenter login --token "${{ secrets.CODEPUSH_API_TOKEN }}"
+
+      - name: Load CodePush signing key
+        if: steps.releasetype.outputs.RELEASE_TYPE == 'codepush'
+        run: echo "${{ secrets.CODEPUSH_SIGNING_PRIVATE_KEY }}" > codepushprivatekey.pem
+
+      - name: Release CodePush bundle non mandatory
+        if: ${{ steps.releasetype.outputs.RELEASE_TYPE == 'codepush' && steps.version.outputs.MANDATORY != 'true' }}
+        run: >
+          appcenter codepush release-react
+          --app mePrism-Inc/meprism_privacy_${{ steps.region.outputs.TARGET_REGION }}_ios
+          --deployment-name Production
+          --development false
+          --private-key-path codepushprivatekey.pem
+          --plist-file ios/mePrism/Info.plist
+          --xcode-project-file ios/mePrism.xcodeproj
+          --description "${{ steps.semver.outputs.fullVersion }}"
+
+      - name: Release CodePush bundle mondatory
+        if: ${{ steps.releasetype.outputs.RELEASE_TYPE == 'codepush' && steps.version.outputs.MANDATORY == 'true' }}
+        run: >
+          appcenter codepush release-react
+          --app mePrism-Inc/meprism_privacy_${{ steps.region.outputs.TARGET_REGION }}_ios
+          --deployment-name Production
+          --development false
+          --private-key-path codepushprivatekey.pem
+          --plist-file ios/mePrism/Info.plist
+          --xcode-project-file ios/mePrism.xcodeproj
+          --description "${{ steps.semver.outputs.fullVersion }}"
+          --mandatory
+
+      - name: Set up build cache
+        uses: mikehardy/buildcache-action@v1
+        if: steps.releasetype.outputs.RELEASE_TYPE == 'appstore'
+        with:
+          upload_buildcache_log: true
+          cache_key: ${{ runner.os }}-react-native-buildcache
+
+      - name: Build iOS app
+        if: steps.releasetype.outputs.RELEASE_TYPE == 'appstore'
+        run: ../../.github/scripts/build_ios.sh
+        env:
+          IOS_PROFILE_KEY: ${{ secrets.IOS_PROFILE_KEY }}
+          TARGET_REGION: ${{ steps.region.outputs.TARGET_REGION }}
+
+      - uses: actions/upload-artifact@v3
+        # Github boolean inputs can behave oddly hence the explicit compare
+        # see https://github.com/actions/runner/issues/1483
+        if: steps.releasetype.outputs.RELEASE_TYPE == 'appstore'
+        with:
+          name: uploaded-ipa
+          path: ios/build/mePrism.ipa
+          if-no-files-found: error
+
 
       - name: 'Upload ipa to app store'
         uses: nick-fields/retry@v2
@@ -63,12 +243,12 @@ jobs:
           timeout_minutes: 10,
           max_attempts: 3,
           command: >
-            cd GithubAction && 
             xcrun altool 
             --upload-app
             --type ios
             --file ios/build/mePrism.ipa
-            --apiKey "${{ secrets.APP_STORE_CONNECT_API_KEY }}"  # Replace placeholder
-            --apiIssuer "${{ secrets.APPSTORE_API_ISSUER }}"  # Replace placeholder
+            --apiKey "${{secrets.APP_STORE_CONNECT_API_KEY}}"
+            --apiIssuer "${{secrets.APP_STORE_CONNECT_ISSUER_ID}}"
 
-# You can keep the build_android and release sections unchanged if you want them for reference or future use.
+  # Other jobs...
+
