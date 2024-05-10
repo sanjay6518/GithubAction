@@ -8,7 +8,7 @@ on:
   workflow_dispatch:
     inputs:
       region:
-        description: Region to target with build (main, staging, or production)
+        description: Region to target with build (main, staging, or  production)
         required: true
         type: choice
         options:
