@@ -41,8 +41,9 @@ jobs:
         run: |
           xcodebuild -exportArchive -archivePath './build/GithubAction.xcarchive' -exportOptionsPlist './exportOptions.plist' -exportPath './build'
 
-      - name: Upload IPA to TestFlight
-        uses: wzieba/TestFlight-Uploader@v1
+      - name: 'Upload ipa to app store'
+        uses: nick-fields/retry@v2
+        if: steps.releasetype.outputs.RELEASE_TYPE == 'appstore'
         with:
           api_key: ${{ secrets.APP_STORE_CONNECT_API_KEY }}
           issuer_id: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
