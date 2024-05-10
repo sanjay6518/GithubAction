@@ -3,18 +3,19 @@ name: Build and deploy mobile app
 
 on:
   push:
-    branches: [development, master, staging]
+    branches: [main, master, staging]
+    paths: [GithubAction/**]
   workflow_dispatch:
     inputs:
       region:
-        description: Region to target with build (development, staging, or production)
+        description: Region to target with build (main, staging, or production)
         required: true
         type: choice
         options:
-          - development
+          - main
           - staging
           - production
-        default: development
+        default: main
       skip_upload_to_app_store:
         description: If set, builds the app as an artifact but does not upload to the play store
         required: false
@@ -59,7 +60,7 @@ jobs:
         if: ${{ github.event_name == 'push' }}
         run: |
           if [[ ${{ github.ref }} == 'refs/heads/development' ]]; then
-            echo region=development >> $GITHUB_ENV
+            echo region=main >> $GITHUB_ENV
             echo "MIXPANEL_PROJECT_TOKEN=${{ secrets.MIXPANEL_PROJECT_TOKEN_NP }}" >> $GITHUB_ENV
           elif [[ ${{ github.ref }} == 'refs/heads/staging' ]]; then
             echo region=staging >> $GITHUB_ENV
@@ -121,7 +122,7 @@ jobs:
             ${{ runner.os }}-pods-
 
       - name: Clean build & Clear Data
-        run: rm -rf Pods && rm -rf Podfile.lock && rm -rf mePrism.xcworkspace && rm -rf ~/Library/Developer/Xcode/DerivedData
+        run: rm -rf Pods && rm -rf Podfile.lock && rm -rf GithubAction.xcworkspace && rm -rf ~/Library/Developer/Xcode/DerivedData
         shell: bash
 
       - name: Install pod dependencies
@@ -194,8 +195,8 @@ jobs:
           --deployment-name Production
           --development false
           --private-key-path codepushprivatekey.pem
-          --plist-file ios/mePrism/Info.plist
-          --xcode-project-file ios/mePrism.xcodeproj
+          --plist-file ios/GithubAction/Info.plist
+          --xcode-project-file ios/GithubAction.xcodeproj
           --description "${{ steps.semver.outputs.fullVersion }}"
 
       - name: Release CodePush bundle mondatory
@@ -206,8 +207,8 @@ jobs:
           --deployment-name Production
           --development false
           --private-key-path codepushprivatekey.pem
-          --plist-file ios/mePrism/Info.plist
-          --xcode-project-file ios/mePrism.xcodeproj
+          --plist-file ios/GithubAction/Info.plist
+          --xcode-project-file ios/GithubAction.xcodeproj
           --description "${{ steps.semver.outputs.fullVersion }}"
           --mandatory
 
@@ -231,7 +232,7 @@ jobs:
         if: steps.releasetype.outputs.RELEASE_TYPE == 'appstore'
         with:
           name: uploaded-ipa
-          path: ios/build/mePrism.ipa
+          path: ios/build/GithubAction.ipa
           if-no-files-found: error
 
 
@@ -245,7 +246,7 @@ jobs:
             xcrun altool 
             --upload-app
             --type ios
-            --file ios/build/mePrism.ipa
+            --file ios/build/GithubAction.ipa
             --apiKey "${{secrets.APP_STORE_CONNECT_API_KEY}}"
             --apiIssuer "${{secrets.APP_STORE_CONNECT_ISSUER_ID}}"
 
