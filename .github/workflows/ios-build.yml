@@ -22,14 +22,13 @@ jobs:
       - uses: maxim-lobanov/setup-xcode@v1
         with:
           xcode-version: '15.2.0'
-      - uses: actions/checkout@v3
 
       - name: Install dependencies
         run: npm install  # Only needed if your build process uses npm
 
       - name: Archive iOS App
         run: |
-          xcodebuild archive -workspace GithubAction.xcworkspace -scheme GithubAction -destination 'generic/platform=iOS' -archivePath './build/GithubAction.xcarchive'
+          xcodebuild archive -workspace ios/GithubAction.xcworkspace -scheme GithubAction -destination 'generic/platform=iOS' -archivePath './build/GithubAction.xcarchive'
 
       - name: Export IPA
         run: |
