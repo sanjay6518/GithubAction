@@ -108,8 +108,8 @@ jobs:
 
       - name: Install dependencies
         run: |
-          npm run codeartifact:login
-          npm config set "always-auth=true"
+          # npm run codeartifact:login
+          # npm config set "always-auth=true"
           yarn
 
       - name: Cache pod dependencies
