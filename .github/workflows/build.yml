@@ -1,0 +1,567 @@
+name: Build and deploy mobile app
+
+defaults:
+  run:
+    working-directory: packages/mobile
+
+on:
+  push:
+    branches: [development, master, staging]
+    paths: [packages/mobile/**]
+  workflow_dispatch:
+    inputs:
+      region:
+        description: Region to target with build (development, staging, or production)
+        required: true
+        type: choice
+        options:
+          - development
+          - staging
+          - production
+        default: development
+      skip_upload_to_app_store:
+        description: If set, builds the app as an artifact but does not upload to the play store
+        required: false
+        type: boolean
+        default: false
+      skip_ios:
+        description: Skips the iOS portion of the build
+        required: false
+        type: boolean
+        default: false
+      skip_android:
+        description: Skips the Android portion of the build
+        required: false
+        type: boolean
+        default: false
+      deployment_type:
+        description: Whether to submit the app to app stores, or deploy via codepush
+        required: true
+        type: choice
+        options:
+          - codepush
+          - appstore
+        default: appstore
+
+jobs:
+  build_ios:
+    name: Build iOS app
+    runs-on: macos-13
+    if: ${{ !inputs.skip_ios }}
+    steps:
+      - uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: '15.2.0'
+      - uses: actions/checkout@v3
+
+      - name: Identify target region from input
+        if: ${{ github.event_name != 'push' }}
+        run: echo region=${{ github.event.inputs.region }} >> $GITHUB_ENV
+
+      - name: Identify target region from branch
+        if: ${{ github.event_name == 'push' }}
+        run: |
+          if [[ ${{ github.ref }} == 'refs/heads/development' ]]; then
+            echo region=development >> $GITHUB_ENV
+            echo "MIXPANEL_PROJECT_TOKEN=${{ secrets.MIXPANEL_PROJECT_TOKEN_NP }}" >> $GITHUB_ENV
+          elif [[ ${{ github.ref }} == 'refs/heads/staging' ]]; then
+            echo region=staging >> $GITHUB_ENV
+            echo "MIXPANEL_PROJECT_TOKEN=${{ secrets.MIXPANEL_PROJECT_TOKEN_NP }}" >> $GITHUB_ENV
+          elif [[ ${{ github.ref }} == 'refs/heads/master' ]]; then
+            echo region=production >> $GITHUB_ENV
+            echo "MIXPANEL_PROJECT_TOKEN=${{ secrets.MIXPANEL_PROJECT_TOKEN_PROD }}" >> $GITHUB_ENV
+          else
+            echo 'Unable to determine app region'
+            exit 1
+          fi
+
+      - name: Identify target region
+        id: region
+        run: |
+          if [[ $region == production ]]; then
+            echo "MIXPANEL_PROJECT_TOKEN=${{ secrets.MIXPANEL_PROJECT_TOKEN_PROD }}" >> $GITHUB_ENV
+          else
+            echo "MIXPANEL_PROJECT_TOKEN=${{ secrets.MIXPANEL_PROJECT_TOKEN_NP }}" >> $GITHUB_ENV
+          fi
+          echo TARGET_REGION=$region >> $GITHUB_OUTPUT
+          echo TARGET_REGION=$region >> $GITHUB_ENV
+          echo TARGET_REGION_CAPITALIZED=$(echo "$region" | tr '[:lower:]' '[:upper:]') >> $GITHUB_OUTPUT
+          cat ".${region}.config" | tee -a $GITHUB_ENV
+
+      - name: Setup provisioning profile
+        run: |
+          cd ../.. && ./.github/scripts/decrypt_secrets.sh
+          echo ${{ secrets.IOS_PROFILE_KEY }} | sed 's/./& /g'
+        env:
+          IOS_PROFILE_KEY: ${{ secrets.IOS_PROFILE_KEY }}
+          APPSTORE_API_KEY: ${{ secrets.APPSTORE_API_KEY }}
+
+      - uses: actions/setup-node@v3
+        with:
+          node-version: 16
+          cache: 'yarn'
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v1
+        if: ${{ !env.ACT }}
+        with:
+          aws-access-key-id: ${{ secrets[format('AWS_ACCESS_KEY_ID_{0}', steps.region.outputs.TARGET_REGION_CAPITALIZED)] }}
+          aws-secret-access-key: ${{ secrets[format('AWS_SECRET_ACCESS_KEY_{0}', steps.region.outputs.TARGET_REGION_CAPITALIZED)] }}
+          aws-region: us-east-1
+
+      - name: Install dependencies
+        run: |
+          npm run codeartifact:login
+          npm config set "always-auth=true"
+          yarn
+
+      - name: Cache pod dependencies
+        uses: actions/cache@v3
+        with:
+          path: packages/mobile/ios/Pods
+          key: ${{ runner.os }}-pods-${{ hashFiles('packages/mobile/ios/Podfile.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-pods-
+
+      - name: Clean build & Clear Data
+        run: rm -rf Pods && rm -rf Podfile.lock && rm -rf mePrism.xcworkspace && rm -rf ~/Library/Developer/Xcode/DerivedData
+        shell: bash
+
+      - name: Install pod dependencies
+        run: cd ios && pod install
+        shell: bash
+
+      - name: Get Build Date
+        id: date
+        run: echo "date=$(TZ=':US/Eastern' date '+%Y%m%d%H%M')" >> $GITHUB_OUTPUT
+
+      - name: Set version information
+        run: |
+          cd ios && xcrun agvtool new-version "${{ steps.date.outputs.date }}"
+
+      - name: Build react app environment settings
+        run: ../../.github/scripts/build_env.sh "${{ steps.region.outputs.TARGET_REGION }}" | tee -a $GITHUB_ENV
+        env:
+          GOOGLE_PLACES_API_KEY: ${{ secrets.GOOGLE_PLACES_API_KEY }}
+          IAPHUB_APP_API_KEY: ${{ secrets[format('IAPHUB_CLIENT_API_KEY_{0}', steps.region.outputs.TARGET_REGION_CAPITALIZED)] }}
+
+      # Key idea here is we want to differentiate patch updates from major/minor updates
+      # patch updates go through CodePush, others through the app store.
+      # since the setup code is identical, it makes sense to have them both here even though
+      # the workflow is very ugly
+      # Of course it would be nice if Github Actions let you GROUP steps in a workflow, a man can dream
+      - name: Get app version from package.json
+        id: version
+        run: |
+          echo "PACKAGE_JSON_VERSION=$(cat package.json | jq --raw-output '.version')" >> $GITHUB_OUTPUT
+          echo "MANDATORY=$(cat package.json | jq --raw-output '.mandatory')" >> $GITHUB_OUTPUT
+
+      - name: Parse app version
+        id: semver
+        uses: booxmedialtd/ws-action-parse-semver@v1
+        with:
+          input_string: ${{ steps.version.outputs.PACKAGE_JSON_VERSION }}
+
+      - name: Get release type from inputs
+        if: ${{ github.event_name != 'push' }}
+        run: echo "RELEASE_TYPE=${{ github.event.inputs.deployment_type }}" >> $GITHUB_ENV
+
+      - name: Get release type from semver
+        if: ${{ github.event_name == 'push' }}
+        run: |
+          if [[ ${{ steps.semver.outputs.patch }} != '0' ]]; then
+            echo "RELEASE_TYPE=codepush" >> $GITHUB_ENV
+          else
+            echo "RELEASE_TYPE=appstore" >> $GITHUB_ENV
+          fi
+
+      - name: Add local node_modules to system path and set release type
+        id: releasetype
+        run: |
+          echo "${PWD}/node_modules/.bin" >> $GITHUB_PATH
+          echo "RELEASE_TYPE=${{ env.RELEASE_TYPE }}" >> $GITHUB_OUTPUT
+
+      - name: Log in to CodePush
+        if: steps.releasetype.outputs.RELEASE_TYPE == 'codepush'
+        run: appcenter login --token "${{ secrets.CODEPUSH_API_TOKEN }}"
+
+      - name: Load CodePush signing key
+        if: steps.releasetype.outputs.RELEASE_TYPE == 'codepush'
+        run: echo "${{ secrets.CODEPUSH_SIGNING_PRIVATE_KEY }}" > codepushprivatekey.pem
+
+      - name: Release CodePush bundle non mandatory
+        if: ${{ steps.releasetype.outputs.RELEASE_TYPE == 'codepush' && steps.version.outputs.MANDATORY != 'true' }}
+        run: >
+          appcenter codepush release-react
+          --app mePrism-Inc/meprism_privacy_${{ steps.region.outputs.TARGET_REGION }}_ios
+          --deployment-name Production
+          --development false
+          --private-key-path codepushprivatekey.pem
+          --plist-file ios/mePrism/Info.plist
+          --xcode-project-file ios/mePrism.xcodeproj
+          --description "${{ steps.semver.outputs.fullVersion }}"
+
+      - name: Release CodePush bundle mondatory
+        if: ${{ steps.releasetype.outputs.RELEASE_TYPE == 'codepush' && steps.version.outputs.MANDATORY == 'true' }}
+        run: >
+          appcenter codepush release-react
+          --app mePrism-Inc/meprism_privacy_${{ steps.region.outputs.TARGET_REGION }}_ios
+          --deployment-name Production
+          --development false
+          --private-key-path codepushprivatekey.pem
+          --plist-file ios/mePrism/Info.plist
+          --xcode-project-file ios/mePrism.xcodeproj
+          --description "${{ steps.semver.outputs.fullVersion }}"
+          --mandatory
+
+      - name: Set up build cache
+        uses: mikehardy/buildcache-action@v1
+        if: steps.releasetype.outputs.RELEASE_TYPE == 'appstore'
+        with:
+          upload_buildcache_log: true
+          cache_key: ${{ runner.os }}-react-native-buildcache
+
+      - name: Build iOS app
+        if: steps.releasetype.outputs.RELEASE_TYPE == 'appstore'
+        run: ../../.github/scripts/build_ios.sh
+        env:
+          IOS_PROFILE_KEY: ${{ secrets.IOS_PROFILE_KEY }}
+          TARGET_REGION: ${{ steps.region.outputs.TARGET_REGION }}
+
+      - uses: actions/upload-artifact@v3
+        # Github boolean inputs can behave oddly hence the explicit compare
+        # see https://github.com/actions/runner/issues/1483
+        if: steps.releasetype.outputs.RELEASE_TYPE == 'appstore'
+        with:
+          name: uploaded-ipa
+          path: packages/mobile/ios/build/mePrism.ipa
+          if-no-files-found: error
+
+      - name: 'Upload ipa to app store'
+        uses: nick-fields/retry@v2
+        if: steps.releasetype.outputs.RELEASE_TYPE == 'appstore'
+        with:
+          timeout_minutes: 10,
+          max_attempts: 3,
+          command: >
+            cd packages/mobile && 
+            xcrun altool 
+            --upload-app
+            --type ios
+            --file ios/build/mePrism.ipa
+            --apiKey "${{secrets.APPSTORE_API_KEY}}"
+            --apiIssuer "${{secrets.APPSTORE_API_ISSUER}}"
+
+  build_android:
+    runs-on: ubuntu-latest
+    name: Build Android app
+    if: ${{ !inputs.skip_android }}
+    outputs:
+      TARGET_REGION: ${{ steps.region.outputs.TARGET_REGION }}
+      RELEASE_TYPE: ${{ steps.releasetype.outputs.RELEASE_TYPE }}
+      RELEASE_VERSION: ${{ steps.semver.outputs.fullVersion }}
+      GP_RELEASE_URL: ${{ steps.region.outputs.GP_RELEASE_URL }}
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v3
+
+      - name: Identify target region from input
+        if: ${{ github.event_name != 'push' }}
+        run: echo region=${{ github.event.inputs.region }} >> $GITHUB_ENV
+
+      - name: Identify target region from branch
+        if: ${{ github.event_name == 'push' }}
+        run: |
+          if [[ ${{ github.ref }} == 'refs/heads/development' ]]; then
+            echo region=development >> $GITHUB_ENV
+            echo "MIXPANEL_PROJECT_TOKEN=${{ secrets.MIXPANEL_PROJECT_TOKEN_NP }}" >> $GITHUB_ENV
+          elif [[ ${{ github.ref }} == 'refs/heads/staging' ]]; then
+            echo region=staging >> $GITHUB_ENV
+            echo "MIXPANEL_PROJECT_TOKEN=${{ secrets.MIXPANEL_PROJECT_TOKEN_NP }}" >> $GITHUB_ENV
+          elif [[ ${{ github.ref }} == 'refs/heads/master' ]]; then
+            echo region=production >> $GITHUB_ENV
+            echo "MIXPANEL_PROJECT_TOKEN=${{ secrets.MIXPANEL_PROJECT_TOKEN_PROD }}" >> $GITHUB_ENV
+          else
+            echo 'Unable to determine app region'
+            exit 1
+          fi
+
+      - name: Identify target region
+        id: region
+        run: |
+          if [[ $region == production ]]; then
+            echo "MIXPANEL_PROJECT_TOKEN=${{ secrets.MIXPANEL_PROJECT_TOKEN_PROD }}" >> $GITHUB_ENV
+          else
+            echo "MIXPANEL_PROJECT_TOKEN=${{ secrets.MIXPANEL_PROJECT_TOKEN_NP }}" >> $GITHUB_ENV
+          fi
+          echo TARGET_REGION=$region >> $GITHUB_OUTPUT
+          echo TARGET_REGION=$region >> $GITHUB_ENV
+          echo TARGET_REGION_CAPITALIZED=$(echo "$region" | tr '[:lower:]' '[:upper:]') >> $GITHUB_OUTPUT
+          cat ".${region}.config" | tee -a $GITHUB_ENV
+          source ".${region}.config" && echo GP_RELEASE_URL=$GP_RELEASE_URL >> $GITHUB_OUTPUT
+
+      - name: Set up Java
+        uses: actions/setup-java@v3
+        with:
+          distribution: 'temurin'
+          java-version: '11'
+
+      - uses: actions/setup-node@v3
+        with:
+          node-version: 16
+          cache: 'yarn'
+
+      - name: Cache gradlew
+        uses: actions/cache@v3
+        with:
+          path: ~/.gradle/wrapper
+          key: ${{ runner.os }}-gradle-wrapper-${{ hashFiles('gradle/wrapper/gradle-wrapper.properties') }}
+
+      - name: Cache gradle cache
+        uses: actions/cache@v3
+        with:
+          path: ~/.gradle/caches
+          key: ${{ runner.os }}-gradle-wrapper-${{ hashFiles('gradle/wrapper/gradle-wrapper.properties') }}
+          restore-keys: ${{ runner.os }}-gradle-caches-
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v1
+        if: ${{ !env.ACT }}
+        with:
+          aws-access-key-id: ${{ secrets[format('AWS_ACCESS_KEY_ID_{0}', steps.region.outputs.TARGET_REGION_CAPITALIZED)] }}
+          aws-secret-access-key: ${{ secrets[format('AWS_SECRET_ACCESS_KEY_{0}', steps.region.outputs.TARGET_REGION_CAPITALIZED)] }}
+          aws-region: us-east-1
+
+      - name: Install dependencies
+        run: |
+          npm install -g yarn@1.22.19
+          yarn run codeartifact:login
+          npm config set "always-auth" true
+          yarn install --network-timeout=30000
+
+      - name: Setup gradlew
+        run: cd ./android && chmod +x ./gradlew
+
+      - name: Build react app environment settings
+        run: ../.././.github/scripts/build_env.sh "${{ steps.region.outputs.TARGET_REGION }}" | tee -a $GITHUB_ENV
+        env:
+          GOOGLE_PLACES_API_KEY: ${{ secrets.GOOGLE_PLACES_API_KEY }}
+          IAPHUB_APP_API_KEY: ${{ secrets[format('IAPHUB_CLIENT_API_KEY_{0}', steps.region.outputs.TARGET_REGION_CAPITALIZED)] }}
+
+      - name: Get app version from package.json
+        id: version
+        run: |
+          echo "PACKAGE_JSON_VERSION=$(cat package.json | jq --raw-output '.version')" >> $GITHUB_OUTPUT
+          echo "MANDATORY=$(cat package.json | jq --raw-output '.mandatory')" >> $GITHUB_OUTPUT
+
+      - name: Parse app version
+        id: semver
+        uses: booxmedialtd/ws-action-parse-semver@v1
+        with:
+          input_string: ${{ steps.version.outputs.PACKAGE_JSON_VERSION }}
+
+      - name: Get release type from inputs
+        if: ${{ github.event_name != 'push' }}
+        run: echo "RELEASE_TYPE=${{ github.event.inputs.deployment_type }}" >> $GITHUB_ENV
+
+      - name: Get release type from semver
+        if: ${{ github.event_name == 'push' }}
+        run: |
+          if [[ ${{ steps.semver.outputs.patch }} != '0' ]]; then
+            echo "RELEASE_TYPE=codepush" >> $GITHUB_ENV
+          else
+            echo "RELEASE_TYPE=appstore" >> $GITHUB_ENV
+          fi
+
+      - name: Add local node_modules to system path and set release type
+        id: releasetype
+        run: |
+          echo "${PWD}/node_modules/.bin" >> $GITHUB_PATH
+          echo "RELEASE_TYPE=${{ env.RELEASE_TYPE }}" >> $GITHUB_OUTPUT
+
+      - name: Log in to CodePush
+        if: steps.releasetype.outputs.RELEASE_TYPE == 'codepush'
+        run: appcenter login --token "${{ secrets.CODEPUSH_API_TOKEN }}"
+
+      - name: Load CodePush signing key
+        if: steps.releasetype.outputs.RELEASE_TYPE == 'codepush'
+        run: echo "${{ secrets.CODEPUSH_SIGNING_PRIVATE_KEY }}" > codepushprivatekey.pem
+
+      - name: Release CodePush bundle non-mandatory
+        if: ${{ steps.releasetype.outputs.RELEASE_TYPE == 'codepush' && steps.version.outputs.MANDATORY != 'true' }}
+        run: >
+          appcenter codepush release-react
+          --app mePrism-Inc/meprism_privacy_${{ steps.region.outputs.TARGET_REGION }}_android
+          --deployment-name Production
+          --development false
+          --private-key-path codepushprivatekey.pem
+          --description "${{ steps.semver.outputs.fullVersion }}"
+
+      - name: Release CodePush bundle mandatory
+        if: ${{ steps.releasetype.outputs.RELEASE_TYPE == 'codepush' && steps.version.outputs.MANDATORY == 'true' }}
+        run: >
+          appcenter codepush release-react
+          --app mePrism-Inc/meprism_privacy_${{ steps.region.outputs.TARGET_REGION }}_android
+          --deployment-name Production
+          --development false
+          --private-key-path codepushprivatekey.pem
+          --description "${{ steps.semver.outputs.fullVersion }}"
+          --mandatory
+
+      - name: Decrypt release keystore
+        if: steps.releasetype.outputs.RELEASE_TYPE == 'appstore'
+        run: |
+          echo "${{ secrets.GOOGLE_RELEASE_KEYSTORE_PGP }}" > release.keystore.asc
+          gpg --passphrase "${{ secrets.GOOGLE_RELEASE_PGP_PASSPHRASE }}" --batch --decrypt release.keystore.asc > android/app/release.keystore
+
+      - name: Configure product flavor
+        if: steps.releasetype.outputs.RELEASE_TYPE == 'appstore'
+        run: echo "BUILD_CMD=bundle${{env.ANDROID_PRODUCT_FLAVOR}}Release" >> $GITHUB_ENV
+
+      - name: Build the signed app bundle
+        if: steps.releasetype.outputs.RELEASE_TYPE == 'appstore'
+        run: >
+          cd android && ./gradlew --no-daemon
+          -PMEPRISM_RELEASE_STORE_FILE=release.keystore
+          -PMEPRISM_RELEASE_STORE_PASSWORD="${{secrets.ANDROID_SIGNING_KEYSTORE_PASSWORD}}"
+          -PMEPRISM_RELEASE_KEY_ALIAS="${{secrets.ANDROID_SIGNING_KEY_ALIAS}}"
+          -PMEPRISM_RELEASE_KEY_PASSWORD="${{secrets.ANDROID_SIGNING_KEY_PASSWORD}}"
+          -Phttp.socketTimeout=200000
+          -Phttp.connectionTimeout=200000
+          "${{env.BUILD_CMD}}"
+
+      - name: Display output directory (for debug) and specify app bundle
+        if: steps.releasetype.outputs.RELEASE_TYPE == 'appstore'
+        run: |
+          ls -R android/app/build/outputs
+          echo "App bundle location:"
+          echo "ANDROID_AAB=$(find android/app/build/outputs -name *.aab)" | tee -a $GITHUB_ENV
+
+      - name: Upload signed app bundle as artifact
+        if: steps.releasetype.outputs.RELEASE_TYPE == 'appstore'
+        uses: actions/upload-artifact@v3
+        with:
+          name: android-app-bundle
+          path: packages/mobile/${{ env.ANDROID_AAB }}
+          if-no-files-found: error
+
+      - name: Upload to Google Play
+        uses: r0adkll/upload-google-play@v1
+        if: ${{ !inputs.skip_upload && steps.releasetype.outputs.RELEASE_TYPE == 'appstore' }}
+        id: upload-google-play
+        with:
+          serviceAccountJsonPlainText: ${{secrets.MEPRISM_SERVICE_JSON}}
+          packageName: ${{env.ANDROID_PACKAGE_NAME}}
+          releaseFiles: packages/mobile/${{env.ANDROID_AAB}}
+          track: internal
+          status: completed
+          inAppUpdatePriority: 5 # the update will trigger ASAP
+          # for now, we have not enable Proguard to reduce production bundle size
+          # if it is enabled, uncomment the following line:
+          # mappingFile: app/build/outputs/mapping/release/mapping.txt
+
+  release:
+    runs-on: ubuntu-latest
+    name: Handle release communication
+    needs: [build_ios, build_android]
+    steps:
+      - name: Tag Release
+        id: tag_version
+        if: ${{ needs.build_android.outputs.TARGET_REGION == 'production'}}
+        uses: mathieudutour/github-tag-action@v6.1
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          custom_tag: ${{ needs.build_android.outputs.RELEASE_VERSION }}
+          tag_prefix: mobile-v
+
+      - uses: actions/download-artifact@v3
+        if: ${{ needs.build_android.outputs.TARGET_REGION == 'production' }}
+        id: download_android
+        with:
+          name: android-app-bundle
+
+      - uses: actions/download-artifact@v3
+        if: ${{ needs.build_android.outputs.TARGET_REGION == 'production' }}
+        id: download_ios
+        with:
+          name: uploaded-ipa
+
+      - name: Create a GitHub release
+        if: ${{ needs.build_android.outputs.TARGET_REGION == 'production' }}
+        uses: ncipollo/release-action@v1
+        with:
+          tag: ${{ steps.tag_version.outputs.new_tag }}
+          name: Release ${{ steps.tag_version.outputs.new_tag }}
+          generateReleaseNotes: true
+          draft: true
+          artifacts: ${{ steps.download_android.outputs.download-path }},${{ steps.download_ios.outputs.download-path }}
+          allowUpdates: true
+
+      - name: Post to a Slack channel
+        id: slack
+        uses: slackapi/slack-github-action@v1.16.0
+        env:
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+        with:
+          # Slack channel id, channel name, or user id to post message.
+          # See also: https://api.slack.com/methods/chat.postMessage#channels
+          channel-id: C015J1ZUEVB
+          # For posting a rich message using Block Kit
+          payload: |
+            {
+              "blocks": [
+                {
+                  "type": "header",
+                  "text": {
+                    "type": "plain_text",
+                    "text": ":champagne: App Release :champagne:"
+                  }
+                },
+                {
+                  "type": "section",
+                  "text": {
+                    "type": "plain_text",
+                    "text": "iOS apps are available in TestFlight. Android apps are available via the button at the bottom of this update.",
+                    "emoji": true
+                  }
+                },
+                {
+                  "type": "section",
+                  "fields": [
+                    {
+                      "type": "mrkdwn",
+                      "text": "*Release Type*\n${{needs.build_android.outputs.RELEASE_TYPE}}"
+                    }
+                  ]
+                },
+                {
+                  "type": "section",
+                  "fields": [
+                    {
+                      "type": "mrkdwn",
+                      "text": "*Environment*\n${{needs.build_android.outputs.TARGET_REGION}}"
+                    },
+                    {
+                      "type": "mrkdwn",
+                      "text": "*Track*\ninternal"
+                    }
+                  ]
+                },
+                {
+                  "type": "actions",
+                  "elements": [
+                    {
+                      "type": "button",
+                      "text": {
+                        "type": "plain_text",
+                        "text": "Go to Android store",
+                        "emoji": true
+                      },
+                      "style": "primary",
+                      "value": "android_click",
+                      "url": "${{needs.build_android.outputs.GP_RELEASE_URL}}"
+                    }
+                  ]
+                }
+              ]
+            }

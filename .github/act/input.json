@@ -1,0 +1,8 @@
+{
+  "inputs": {
+    "NAME": "Manual Workflow",
+    "region": "development",
+    "skip_android": true,
+    "deployment_type": "appstore"
+  }
+}

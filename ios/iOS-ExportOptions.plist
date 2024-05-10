@@ -20,8 +20,14 @@
 	<true/>
   <key>provisioningProfiles</key>
   <dict>
+  <key>com.meprism.privacy</key>
+  <string>mePrism Privacy Profile</string>
+  <key>com.mePrism.client</key>
+  <string>mePrism App Distribution</string>
   <key>com.mePrism.client.development</key>
   <string>mePrism App Distribution-development</string>
+  <key>com.mePrism.client.staging</key>
+  <string>mePrism App Distribution-staging</string>
   </dict>
 </dict>
 </plist>
