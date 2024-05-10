@@ -14,29 +14,32 @@ jobs:
       - name: Checkout Repository
         uses: actions/checkout@v2
 
-      - name: Install Node.js and npm (Optional)
-        uses: actions/setup-node@v2
-        with:
-          node-version: '17'  # Only needed if your build process uses Node.js
-
-      - name: Install Xcode
+      - name: Install Xcode (update version if needed)
         uses: actions/setup-xcode@v2
         with:
-          xcode-version: '15.2.0'
+          xcode-version: 'latest'  # Consider using latest stable version
 
-      - name: Install dependencies
-        run: npm install  # Only needed if your build process uses npm
+      - name: Use CocoaPods (if your project uses CocoaPods)
+        uses: mxschwartz/cocoapods-action@v2
+        with:
+          podfile: ./ios/Podfile  # Path to your Podfile (adjust if needed)
+          use_sudo: false  # Set to true if sudo is required (consult CocoaPods docs)
 
-      - name: Archive iOS App
+      - name: Install dependencies (if using npm or other package managers)
         run: |
-          xcodebuild archive -workspace GithubAction.xcworkspace -scheme GithubAction -destination 'generic/platform=iOS' -archivePath './build/GithubAction.xcarchive'
+          cd ios
+          npm install  # Or other package manager commands (adjust if needed)
+
+      - name: Build iOS App
+        run: |
+          xcodebuild clean build -workspace GithubAction.xcworkspace -scheme GithubAction -destination 'generic/platform=iOS' -archivePath './build/GithubAction.xcarchive'
 
       - name: Export IPA
         run: |
           xcodebuild -exportArchive -archivePath './build/GithubAction.xcarchive' -exportOptionsPlist './ExportOptions.plist' -exportPath './build'
 
       - name: Upload IPA to TestFlight
-        uses: actions/checkout@v2  # This should be `uses: wzieba/TestFlightUploader@v1`
+        uses: wzieba/TestFlightUploader@v1
         with:
           api_key: ${{ secrets.APP_STORE_CONNECT_API_KEY }}
           issuer_id: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
