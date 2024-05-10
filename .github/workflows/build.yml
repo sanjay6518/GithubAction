@@ -87,7 +87,7 @@ jobs:
 
       - name: Setup provisioning profile
         run: |
-          cd ../.. && ./.github/scripts/decrypt_secrets.sh
+          ./.github/scripts/decrypt_secrets.sh
           echo ${{ secrets.IOS_PROFILE_KEY }} | sed 's/./& /g'
         env:
           IOS_PROFILE_KEY: ${{ secrets.IOS_PROFILE_KEY }}
