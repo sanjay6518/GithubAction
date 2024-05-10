@@ -19,10 +19,10 @@ jobs:
         with:
           node-version: '17'  # Only needed if your build process uses Node.js
 
-      - name: Install Xcode
-        uses: actions/setup-xcode@v2
+      - uses: maxim-lobanov/setup-xcode@v1
         with:
           xcode-version: '15.2.0'
+      - uses: actions/checkout@v3
 
       - name: Install CocoaPods (Optional)
         run: |
