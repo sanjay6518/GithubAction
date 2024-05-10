@@ -3,18 +3,18 @@ name: Build and deploy mobile app
 
 on:
   push:
-    branches: [main, master, staging]
+    branches: [development, master, staging]
   workflow_dispatch:
     inputs:
       region:
-        description: Region to target with build (main, staging, or  production)
+        description: Region to target with build (development, staging, or  production)
         required: true
         type: choice
         options:
-          - main
+          - development
           - staging
           - production
-        default: main
+        default: development
       skip_upload_to_app_store:
         description: If set, builds the app as an artifact but does not upload to the play store
         required: false
@@ -59,7 +59,7 @@ jobs:
         if: ${{ github.event_name == 'push' }}
         run: |
           if [[ ${{ github.ref }} == 'refs/heads/development' ]]; then
-            echo region=main >> $GITHUB_ENV
+            echo region=development >> $GITHUB_ENV
             echo "MIXPANEL_PROJECT_TOKEN=${{ secrets.MIXPANEL_PROJECT_TOKEN_NP }}" >> $GITHUB_ENV
           elif [[ ${{ github.ref }} == 'refs/heads/staging' ]]; then
             echo region=staging >> $GITHUB_ENV
