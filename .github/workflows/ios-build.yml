@@ -42,7 +42,7 @@ jobs:
           xcodebuild -exportArchive -archivePath './build/GithubAction.xcarchive' -exportOptionsPlist './exportOptions.plist' -exportPath './build'
 
       - name: Upload IPA to TestFlight
-        uses: wzieba/TestFlightUploader@v1
+        uses: wzieba/TestFlight-Uploader@v1
         with:
           api_key: ${{ secrets.APP_STORE_CONNECT_API_KEY }}
           issuer_id: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
