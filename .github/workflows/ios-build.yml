@@ -36,7 +36,7 @@ jobs:
 
       - name: Export IPA
         run: |
-          xcodebuild -exportArchive -archivePath './build/GithubAction.xcarchive' -exportOptionsPlist './ExportOptions.plist' -exportPath './build'
+          xcodebuild -exportArchive -archivePath './build/GithubAction.xcarchive' -exportOptionsPlist './exportOptions.plist' -exportPath './build'
 
       - name: Upload IPA to TestFlight
         uses: wzieba/TestFlightUploader@v1
