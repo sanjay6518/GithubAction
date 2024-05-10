@@ -14,25 +14,28 @@ jobs:
       - name: Checkout Repository
         uses: actions/checkout@v2
 
-      - name: Install Xcode (update version if needed)
+      - name: Install Node.js and npm (Optional)
+        uses: actions/setup-node@v2
+        with:
+          node-version: '17'  # Only needed if your build process uses Node.js
+
+      - name: Install Xcode
         uses: actions/setup-xcode@v2
         with:
-          xcode-version: 'latest'  # Consider using latest stable version
+          xcode-version: '15.2.0'
 
-      - name: Use CocoaPods (if your project uses CocoaPods)
-        uses: mxschwartz/cocoapods-action@v2
-        with:
-          podfile: ./ios/Podfile  # Path to your Podfile (adjust if needed)
-          use_sudo: false  # Set to true if sudo is required (consult CocoaPods docs)
-
-      - name: Install dependencies (if using npm or other package managers)
+      - name: Install CocoaPods (Optional)
         run: |
-          cd ios
-          npm install  # Or other package manager commands (adjust if needed)
+          gem install cocoapods
+          pod install
+        working-directory: ios  # Assuming Podfile is in the `ios` directory
 
-      - name: Build iOS App
+      - name: Install dependencies
+        run: npm install  # Only needed if your build process uses npm
+
+      - name: Archive iOS App
         run: |
-          xcodebuild clean build -workspace GithubAction.xcworkspace -scheme GithubAction -destination 'generic/platform=iOS' -archivePath './build/GithubAction.xcarchive'
+          xcodebuild archive -workspace GithubAction.xcworkspace -scheme GithubAction -destination 'generic/platform=iOS' -archivePath './build/GithubAction.xcarchive'
 
       - name: Export IPA
         run: |
