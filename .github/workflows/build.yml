@@ -92,7 +92,12 @@ jobs:
         env:
           IOS_PROFILE_KEY: ${{ secrets.IOS_PROFILE_KEY }}
           APPSTORE_API_KEY: ${{ secrets.APPSTORE_API_KEY }}
-
+      - name: Debug secrets and variables
+        run: |
+          echo "RELEASE_TYPE: ${{ steps.releasetype.outputs.RELEASE_TYPE }}"
+          echo "TARGET_REGION: ${{ steps.region.outputs.TARGET_REGION }}"
+          echo "CODEPUSH_API_TOKEN: ${{ secrets.CODEPUSH_API_TOKEN }}"
+          
       - uses: actions/setup-node@v3
         with:
           node-version: 18
@@ -176,38 +181,38 @@ jobs:
           echo "${PWD}/node_modules/.bin" >> $GITHUB_PATH
           echo "RELEASE_TYPE=${{ env.RELEASE_TYPE }}" >> $GITHUB_OUTPUT
 
-      # - name: Log in to CodePush
-      #   if: steps.releasetype.outputs.RELEASE_TYPE == 'codepush'
-      #   run: appcenter login --token "${{ secrets.CODEPUSH_API_TOKEN }}"
+      - name: Log in to CodePush
+        if: steps.releasetype.outputs.RELEASE_TYPE == 'codepush'
+        run: appcenter login --token "${{ secrets.CODEPUSH_API_TOKEN }}"
 
-      # - name: Load CodePush signing key
-      #   if: steps.releasetype.outputs.RELEASE_TYPE == 'codepush'
-      #   run: echo "${{ secrets.CODEPUSH_SIGNING_PRIVATE_KEY }}" > codepushprivatekey.pem
+      - name: Load CodePush signing key
+        if: steps.releasetype.outputs.RELEASE_TYPE == 'codepush'
+        run: echo "${{ secrets.CODEPUSH_SIGNING_PRIVATE_KEY }}" > codepushprivatekey.pem
 
-      # - name: Release CodePush bundle non mandatory
-      #   if: ${{ steps.releasetype.outputs.RELEASE_TYPE == 'codepush' && steps.version.outputs.MANDATORY != 'true' }}
-      #   run: >
-      #     appcenter codepush release-react
-      #     --app mePrism-Inc/meprism_privacy_${{ steps.region.outputs.TARGET_REGION }}_ios
-      #     --deployment-name Production
-      #     --development false
-      #     --private-key-path codepushprivatekey.pem
-      #     --plist-file ios/GithubAction/Info.plist
-      #     --xcode-project-file ios/GithubAction.xcodeproj
-      #     --description "${{ steps.semver.outputs.fullVersion }}"
+      - name: Release CodePush bundle non mandatory
+        if: ${{ steps.releasetype.outputs.RELEASE_TYPE == 'codepush' && steps.version.outputs.MANDATORY != 'true' }}
+        run: >
+          appcenter codepush release-react
+          --app mePrism-Inc/meprism_privacy_${{ steps.region.outputs.TARGET_REGION }}_ios
+          --deployment-name Production
+          --development false
+          --private-key-path codepushprivatekey.pem
+          --plist-file ios/GithubAction/Info.plist
+          --xcode-project-file ios/GithubAction.xcodeproj
+          --description "${{ steps.semver.outputs.fullVersion }}"
 
-      # - name: Release CodePush bundle mondatory
-      #   if: ${{ steps.releasetype.outputs.RELEASE_TYPE == 'codepush' && steps.version.outputs.MANDATORY == 'true' }}
-      #   run: >
-      #     appcenter codepush release-react
-      #     --app mePrism-Inc/meprism_privacy_${{ steps.region.outputs.TARGET_REGION }}_ios
-      #     --deployment-name Production
-      #     --development false
-      #     --private-key-path codepushprivatekey.pem
-      #     --plist-file ios/GithubAction/Info.plist
-      #     --xcode-project-file ios/GithubAction.xcodeproj
-      #     --description "${{ steps.semver.outputs.fullVersion }}"
-      #     --mandatory
+      - name: Release CodePush bundle mondatory
+        if: ${{ steps.releasetype.outputs.RELEASE_TYPE == 'codepush' && steps.version.outputs.MANDATORY == 'true' }}
+        run: >
+          appcenter codepush release-react
+          --app mePrism-Inc/meprism_privacy_${{ steps.region.outputs.TARGET_REGION }}_ios
+          --deployment-name Production
+          --development false
+          --private-key-path codepushprivatekey.pem
+          --plist-file ios/GithubAction/Info.plist
+          --xcode-project-file ios/GithubAction.xcodeproj
+          --description "${{ steps.semver.outputs.fullVersion }}"
+          --mandatory
 
       - name: Set up build cache
         uses: mikehardy/buildcache-action@v1
